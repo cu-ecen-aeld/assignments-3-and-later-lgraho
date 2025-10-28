@@ -1,5 +1,10 @@
 #include "systemcalls.h"
 
+#include <stdlib.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/wait.h>
+
 /**
  * @param cmd the command to execute with system()
  * @return true if the command in @param cmd was executed
@@ -16,6 +21,9 @@ bool do_system(const char *cmd)
  *   and return a boolean true if the system() call completed with success
  *   or false() if it returned a failure
 */
+
+    if(system(cmd) != 0)
+        return false;
 
     return true;
 }
@@ -45,9 +53,8 @@ bool do_exec(int count, ...)
         command[i] = va_arg(args, char *);
     }
     command[count] = NULL;
-    // this line is to avoid a compile warning before your implementation is complete
-    // and may be removed
-    command[count] = command[count];
+
+    va_end(args);
 
 /*
  * TODO:
@@ -59,9 +66,32 @@ bool do_exec(int count, ...)
  *
 */
 
-    va_end(args);
+    pid_t pid = fork();
+    if (pid < 0) {
+        perror("fork failed");
+        return false;
+    }
 
-    return true;
+    if(pid == 0)
+    {
+        // child process
+        execv(command[0], command);
+
+        // If execv returns, it's an error
+        perror("execv failed");
+        exit(EXIT_FAILURE);
+    }
+
+    // Parent process: wait for child
+    int status;
+    if (wait(&status) < 0) {
+        perror("wait failed");
+        return false;
+    }
+
+
+    // Return true if child exited successfully (status == 0)
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0;
 }
 
 /**
@@ -80,10 +110,7 @@ bool do_exec_redirect(const char *outputfile, int count, ...)
         command[i] = va_arg(args, char *);
     }
     command[count] = NULL;
-    // this line is to avoid a compile warning before your implementation is complete
-    // and may be removed
-    command[count] = command[count];
-
+    va_end(args);
 
 /*
  * TODO
@@ -93,7 +120,44 @@ bool do_exec_redirect(const char *outputfile, int count, ...)
  *
 */
 
-    va_end(args);
+    pid_t pid = fork();
+    if (pid < 0) {
+        perror("fork failed");
+        return false;
+    }
 
-    return true;
+    if (pid == 0) {
+        // Child process
+
+        int fd = open(outputfile, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (fd < 0) {
+            perror("open failed");
+            exit(EXIT_FAILURE);
+        }
+
+        // Redirect stdout to file
+        if (dup2(fd, STDOUT_FILENO) < 0) {
+            perror("dup2 failed");
+            close(fd);
+            exit(EXIT_FAILURE);
+        }
+
+        close(fd);
+
+        execv(command[0], command);
+
+        // If execv returns, it's an error
+        perror("execv failed");
+        exit(EXIT_FAILURE);
+    }
+
+    // Parent process: wait for child
+    int status;
+    if (wait(&status) < 0) {
+        perror("wait failed");
+        return false;
+    }
+
+    // Return true if child exited successfully (status == 0)
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0;
 }
