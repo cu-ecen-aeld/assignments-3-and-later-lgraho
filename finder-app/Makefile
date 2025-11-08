@@ -1,5 +1,7 @@
+all: writer
+
 writer: writer.c
-	$(CROSS_COMPILE)gcc writer.c -o writer
+	$(CC) $(CCFLAGS) writer.c -o writer
 
 clean:
 	rm -f writer *.o
