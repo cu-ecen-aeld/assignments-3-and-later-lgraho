@@ -12,9 +12,11 @@
 #include <pthread.h>
 #include <stdbool.h>
 #include <sys/queue.h>
+#include <time.h>
 
 #define PORT 9000
 #define FILE_PATH "/var/tmp/aesdsocketdata"
+#define TIMESTAMP_INTERVAL_S 10
 
 struct thread_data {
     int read_fd;
@@ -38,8 +40,9 @@ int client_socket = -1;
 int write_fd = -1;
 int read_fd = -1;
 bool run_as_daemon = false;
-volatile bool exit_requested = false; // TODO: replace with semaphore?
+volatile bool exit_requested = false;
 struct thread_list_head tl_head = SLIST_HEAD_INITIALIZER(tl_head);
+timer_t timerid = NULL;
 
 // Check for completed threads and clean them up
 void cleanup_completed_threads()
@@ -180,14 +183,25 @@ void* connection_handler(void *arg)
     char buffer[1024];
 
     while (!exit_requested && (bytes_received = recv(td->client_socket, buffer, sizeof(buffer), 0)) > 0) {
-        pthread_mutex_lock(td->file_mutex);
-
-        if (handle_received_data(td, buffer, bytes_received) == -1) {
-            pthread_mutex_unlock(td->file_mutex);
+        if(pthread_mutex_lock(td->file_mutex) != 0)
+        {
+            syslog(LOG_ERR, "Mutex lock failed: %s", strerror(errno));
             break;
         }
 
-        pthread_mutex_unlock(td->file_mutex);
+        if (handle_received_data(td, buffer, bytes_received) == -1) {
+            if(pthread_mutex_unlock(td->file_mutex) != 0)
+            {
+                syslog(LOG_ERR, "Mutex unlock failed: %s", strerror(errno));
+            }
+            break;
+        }
+
+        if(pthread_mutex_unlock(td->file_mutex) != 0)
+        {
+            syslog(LOG_ERR, "Mutex unlock failed: %s", strerror(errno));
+            break;
+        }
     }
 
     if (bytes_received == -1) {
@@ -200,11 +214,45 @@ void* connection_handler(void *arg)
     return td;
 }
 
-void* timestamp_handler(void *arg)
+void timestamp_thread(union sigval sigval)
 {
-    // Thread periodically appending timestamp to the output file
-    // TODO
-    return NULL;
+    // Thread for periodically appending timestamp to the output file
+    struct thread_data *td = (struct thread_data*)sigval.sival_ptr;
+    char outstr[100];
+    time_t now = 0;
+    struct tm *lt = NULL;
+
+    // Get current time
+    now = time(NULL);
+    lt = localtime(&now);
+    if(lt == NULL)
+    {
+        syslog(LOG_ERR, "localtime failed: %s", strerror(errno));
+        return;
+    }
+
+    if(strftime(outstr, sizeof(outstr), "timestamp:%a, %d %b %Y %T %z\n", lt) == 0)
+    {
+        syslog(LOG_ERR, "strftime failed: %s", strerror(errno));
+        return;
+    }
+
+    // Append timestamp to file
+    if(pthread_mutex_lock(td->file_mutex) != 0)
+    {
+        syslog(LOG_ERR, "Mutex lock failed: %s", strerror(errno));
+        return;
+    }
+
+    write_to_file(td->write_fd, outstr, strlen(outstr));
+
+    if(pthread_mutex_unlock(td->file_mutex) != 0)
+    {
+        syslog(LOG_ERR, "Mutex unlock failed: %s", strerror(errno));
+        return;
+    }
+
+    return;
 }
 
 int main(int argc, char *argv[]) {
@@ -278,6 +326,50 @@ int main(int argc, char *argv[]) {
 
     // Initialize thread list
     SLIST_INIT(&tl_head);
+
+    // Setup POSIX timer for timestamp thread
+    struct sigevent sev;
+    struct thread_data *timer_td_ptr = NULL;
+    timer_td_ptr = (struct thread_data*)malloc(sizeof(struct thread_data));
+    if(NULL != timer_td_ptr)
+    {
+        timer_td_ptr->read_fd = read_fd;
+        timer_td_ptr->write_fd = write_fd;
+        timer_td_ptr->client_socket = -1; // Not used
+        timer_td_ptr->file_mutex = &file_mutex;
+        timer_td_ptr->completed = false;
+    }
+    else
+    {
+        syslog(LOG_ERR, "Memory allocation failed: %s", strerror(errno));
+        cleanup_and_exit(-1);
+    }
+
+    memset(&sev, 0, sizeof(struct sigevent));
+    sev.sigev_notify = SIGEV_THREAD;
+    sev.sigev_value.sival_ptr = timer_td_ptr;
+    sev.sigev_notify_function = timestamp_thread;
+
+    if(timer_create(CLOCK_MONOTONIC, &sev, &timerid) == -1)
+    {
+        syslog(LOG_ERR, "Timer creation failed: %s", strerror(errno));
+        free(timer_td_ptr);
+        cleanup_and_exit(-1);
+    }
+    struct itimerspec its;
+    memset(&its, 0, sizeof(struct itimerspec));
+    its.it_interval.tv_sec = TIMESTAMP_INTERVAL_S;
+    its.it_interval.tv_nsec = 0;
+    // By default, the initial expiration time specified in new_value->it_value is interpreted relative to the current time on the timer's clock at the time of the call.
+    its.it_value.tv_sec = TIMESTAMP_INTERVAL_S;
+    its.it_value.tv_nsec = 0;
+    if(timer_settime(timerid, 0, &its, NULL) != 0) {
+        syslog(LOG_ERR, "Error setting timer: %s", strerror(errno));
+        timer_delete(timerid);
+        free(timer_td_ptr);
+        cleanup_and_exit(-1);
+    } 
+
 
     while (1) {
         // Accept connection
