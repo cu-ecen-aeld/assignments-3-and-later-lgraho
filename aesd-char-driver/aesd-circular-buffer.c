@@ -16,6 +16,25 @@
 
 #include "aesd-circular-buffer.h"
 
+#undef PDEBUG             /* undef it, just in case */
+#ifdef AESD_CIRCULAR_BUFFER_DEBUG
+#  ifdef __KERNEL__
+     /* This one if debugging is on, and kernel space */
+#    define PDEBUG(fmt, args...) printk( KERN_DEBUG "aesd_circular_buffer: " fmt, ## args)
+#  else
+     /* This one for user space */
+#    define PDEBUG(fmt, args...) fprintf(stderr, fmt, ## args)
+#  endif
+#else
+#  define PDEBUG(fmt, args...) /* not debugging: nothing */
+#endif
+
+#undef PDEBUGG
+#define PDEBUGG(fmt, args...) /* nothing: it's a placeholder */
+
+/* Helper macro for incrementing the given circular buffer index, considering wraparound at the defined buffer size */
+#define CIRCULAR_BUFFER_INCREMENT_INDEX(idx) (idx = ((idx + 1) % AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED))
+
 /**
  * @param buffer the buffer to search for corresponding offset.  Any necessary locking must be performed by caller.
  * @param char_offset the position to search for in the buffer list, describing the zero referenced
@@ -29,9 +48,36 @@
 struct aesd_buffer_entry *aesd_circular_buffer_find_entry_offset_for_fpos(struct aesd_circular_buffer *buffer,
             size_t char_offset, size_t *entry_offset_byte_rtn )
 {
-    /**
-    * TODO: implement per description
-    */
+    struct aesd_buffer_entry *entry_it;
+    size_t idx;
+
+    if(buffer == NULL || entry_offset_byte_rtn == NULL)
+    {
+        PDEBUG("aesd_circular_buffer_find_entry_offset_for_fpos: nullpointer given");
+        return NULL;
+    }
+
+    if(!buffer->full && (buffer->out_offs == buffer->in_offs))
+    {
+        // buffer is empty
+        return NULL;
+    }
+
+    // iterate over buffer entries until finding the entry corresponding to the given character offset
+    idx = buffer->out_offs;
+    do {
+        entry_it = &buffer->entry[idx];
+        if(char_offset < entry_it->size)
+        {
+            // found corresponding entry -> return current character offset and pointer to entry
+            *entry_offset_byte_rtn = char_offset;
+            return entry_it;
+        }
+        char_offset -= entry_it->size;
+        CIRCULAR_BUFFER_INCREMENT_INDEX(idx);
+    } while(idx != buffer->in_offs);
+
+    // given position is not available in buffer
     return NULL;
 }
 
@@ -44,9 +90,25 @@ struct aesd_buffer_entry *aesd_circular_buffer_find_entry_offset_for_fpos(struct
 */
 void aesd_circular_buffer_add_entry(struct aesd_circular_buffer *buffer, const struct aesd_buffer_entry *add_entry)
 {
-    /**
-    * TODO: implement per description
-    */
+    if(buffer == NULL || add_entry == NULL)
+    {
+        PDEBUG("aesd_circular_buffer_add_entry: nullpointer given");
+        return;
+    }
+
+    // add new entry
+    buffer->entry[buffer->in_offs].buffptr = add_entry->buffptr;
+    buffer->entry[buffer->in_offs].size = add_entry->size;
+
+    // advance write location
+    CIRCULAR_BUFFER_INCREMENT_INDEX(buffer->in_offs);
+
+    // if buffer is already full, also advance read position and drop oldest entry
+    if(buffer->full)
+        CIRCULAR_BUFFER_INCREMENT_INDEX(buffer->out_offs);
+
+    // if read and write locations are equal, mark buffer as full
+    buffer->full = (buffer->in_offs == buffer->out_offs);
 }
 
 /**
